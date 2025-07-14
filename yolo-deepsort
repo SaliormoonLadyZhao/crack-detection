@@ -1,0 +1,110 @@
+import cv2
+import numpy as np
+import csv
+import os  # 确保导入 os 模块
+from ultralytics import YOLO
+from deep_sort_realtime.deepsort_tracker import DeepSort
+
+# 初始化 YOLOv8 模型
+model = YOLO("*")  # 替换为你的模型路径
+
+# 初始化 DeepSORT 跟踪器
+tracker = DeepSort(max_age=50, n_init=3)
+
+# 打开视频文件
+cap = cv2.VideoCapture("*.mp4")  # 替换为你的视频路径
+
+# 获取视频属性
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+# 初始化 VideoWriter（保存跟踪结果视频）
+output_video_path = "*.mp4"
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter(output_video_path, fourcc, fps, (frame_width, frame_height))
+
+# 初始化 CSV 文件（保存检测结果）
+output_csv_path = "*.csv"
+csv_file = open(output_csv_path, mode='w', newline='')
+csv_writer = csv.writer(csv_file)
+csv_writer.writerow(["Frame", "Track ID", "Class", "X1", "Y1", "X2", "Y2"])
+
+# 定义保存图片的目录
+output_img_dir = "*"  # <-- 定义 output_img_dir
+os.makedirs(output_img_dir, exist_ok=True)  # 如果目录不存在，则创建
+
+# 计数变量
+vehicle_count = 0
+tracked_ids = set()
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))  # 当前帧编号
+
+    # YOLOv8 检测
+    model.to("cuda")
+    results = model(frame)
+    detections = []
+
+    for result in results:
+        boxes = result.boxes.xyxy.cpu().numpy()
+        scores = result.boxes.conf.cpu().numpy()
+        classes = result.boxes.cls.cpu().numpy()
+
+        for box, score, cls in zip(boxes, scores, classes):
+            if int(cls) in [2, 5, 7]:  # 2: car, 5: bus, 7: truck
+                detections.append((box, score, int(cls)))
+
+    # DeepSORT 跟踪
+    tracks = tracker.update_tracks(detections, frame=frame)
+
+    # 绘制跟踪框并保存结果
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        track_id = track.track_id
+        ltrb = track.to_ltrb()
+
+        # 写入 CSV
+        csv_writer.writerow([current_frame, track_id, int(cls), ltrb[0], ltrb[1], ltrb[2], ltrb[3]])
+
+        # 绘制检测框和 ID
+        cv2.rectangle(frame, (int(ltrb[0]), int(ltrb[1])), (int(ltrb[2]), int(ltrb[3])), (0, 255, 0), 2)
+        cv2.putText(frame, f"ID: {track_id}", (int(ltrb[0]), int(ltrb[1]) - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # 计数
+        if track_id not in tracked_ids:
+            tracked_ids.add(track_id)
+            vehicle_count += 1
+
+    # 显示计数
+    cv2.putText(frame, f"Defect Count: {vehicle_count}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    # 写入视频
+    out.write(frame)
+
+    # 显示帧
+    cv2.imshow("Defect Tracking", frame)
+
+    # 每秒保存一张图片
+    if current_frame % fps == 0:
+        seconds = current_frame // fps
+        output_img_path = os.path.join(output_img_dir, f"frame_{seconds}s.jpg")  # <-- 使用已定义的 output_img_dir
+        cv2.imwrite(output_img_path, frame)
+        print(f"Saved: {output_img_path}")
+
+    # 按 'q' 退出
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# 释放资源
+cap.release()
+out.release()
+csv_file.close()
+cv2.destroyAllWindows()
