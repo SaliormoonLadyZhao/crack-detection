@@ -1,0 +1,58 @@
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+import json
+from PIL import Image
+import cv2
+import numpy as np
+
+class CrackDataset(Dataset):
+    def __init__(self, img_dir, seg_dir, coco_anno_path, transform=None):
+        self.img_dir = img_dir
+        self.seg_dir = seg_dir
+        self.transform = transform
+        with open(coco_anno_path) as f:
+            self.coco_anno = json.load(f)
+        self.image_ids = [img["id"] for img in self.coco_anno["images"]]
+
+    def __len__(self):
+        return len(self.image_ids)
+
+    def __getitem__(self, idx):
+        # 加载图像和分割掩码
+        img_info = self.coco_anno["images"][idx]
+        img_path = f"{self.img_dir}/{img_info['file_name']}"
+        seg_path = f"{self.seg_dir}/{img_info['file_name'].replace('.jpg', '.png')}"
+        image = Image.open(img_path).convert("RGB")
+        seg_mask = np.array(Image.open(seg_path).convert("L"))  # 转为numpy二值掩码
+        seg_mask = (seg_mask > 128).astype(np.float32)  # 阈值化
+
+        # 加载检测标注（COCO格式）
+        annos = [a for a in self.coco_anno["annotations"] if a["image_id"] == img_info["id"]]
+        boxes = [a["bbox"] for a in annos]  # [x, y, w, h]
+        classes = [a["category_id"] for a in annos]
+
+        # 数据增强
+        if self.transform:
+            image = self.transform(image)
+            seg_mask = Image.fromarray(seg_mask)
+            seg_mask = self.transform(seg_mask)
+
+        # 转为Tensor
+        boxes = torch.tensor(boxes, dtype=torch.float32)
+        classes = torch.tensor(classes, dtype=torch.long)
+
+        return image, {"seg": seg_mask, "boxes": boxes, "classes": classes}
+
+# 数据增强和加载
+transform = transforms.Compose([
+    transforms.Resize((512, 512)),
+    transforms.ToTensor(),
+])
+dataset = CrackDataset(
+    img_dir="path/to/images",
+    seg_dir="path/to/masks",
+    coco_anno_path="path/to/annotations.json",
+    transform=transform
+)
+dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=lambda x: x)  # 自定义collate_fn需稍后定义
