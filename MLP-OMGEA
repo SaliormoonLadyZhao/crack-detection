@@ -1,0 +1,17 @@
+class DynamicOmegaMLP(nn.Module):
+    def __init__(self, min_omega=0.3, max_omega=0.7, hidden_dim=32):
+        super().__init__()
+        self.min = min_omega
+        self.max = max_omega
+        self.mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),  # 输入GAP后的标量
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, scores):
+        gap = torch.mean(scores, dim=[1,2,3])  # [B]
+        omega = self.mlp(gap.unsqueeze(-1)).squeeze()  # [B]
+        omega = self.min + (self.max - self.min) * omega
+        return omega
