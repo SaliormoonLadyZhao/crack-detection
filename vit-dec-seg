@@ -1,0 +1,47 @@
+import torch
+import torch.nn as nn
+from transformers import ViTModel
+
+
+class MultiTaskViT(nn.Module):
+        def __init__(self, vit_model="google/vit-base-patch16-224"):
+                super().__init__()
+                # ViT主干（共享特征提取）
+                self.vit = ViTModel.from_pretrained(vit_model)
+                hidden_dim = self.vit.config.hidden_size
+
+                # 分割头（上采样路径）
+                self.seg_head = nn.Sequential(
+                        nn.ConvTranspose2d(hidden_dim, 256, kernel_size=4, stride=4),  # 16倍上采样
+                        nn.ReLU(),
+                        nn.Conv2d(256, 128, kernel_size=3, padding=1),
+                        nn.Upsample(scale_factor=2, mode='bilinear'),  # 最终分辨率=输入尺寸
+                        nn.Conv2d(128, 1, kernel_size=1),  # 输出单通道掩码
+                        nn.Sigmoid()
+                )
+
+                # 检测头（Decoder路径）
+                self.det_decoder = nn.TransformerDecoder(
+                        nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=8),
+                        num_layers=2
+                )
+                self.det_head = nn.Linear(hidden_dim, 5)  # 输出5维：类别(1) + 坐标(xywh)
+
+        def forward(self, x):
+                # ViT主干提取特征
+                vit_outputs = self.vit(x)
+                patch_tokens = vit_outputs.last_hidden_state  # [B, N+1, D]
+
+                # 分割任务：利用所有patch tokens
+                patch_tokens_2d = patch_tokens[:, 1:].transpose(1, 2)  # 移除[CLS], 转为[B, D, N]
+                B, D, N = patch_tokens_2d.shape
+                H = W = int(N ** 0.5)
+                seg_feats = patch_tokens_2d.reshape(B, D, H, W)  # 转为2D特征图
+                seg_output = self.seg_head(seg_feats)  # 上采样到原图大小
+
+                # 检测任务：利用[CLS] token作为query
+                cls_token = patch_tokens[:, 0].unsqueeze(1)  # [B, 1, D]
+                det_output = self.det_decoder(cls_token, patch_tokens)
+                det_output = self.det_head(det_output.squeeze(1))  # [B, 5]
+
+                return seg_output, det_output
